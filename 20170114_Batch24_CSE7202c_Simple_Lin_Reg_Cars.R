@@ -11,7 +11,7 @@
 # Toyota Corolla based on its age.  Age is given in months.
 
 rm(list=ls(all=TRUE))
-setwd("D:/AMITS_LABS/BATCH 24/Day07_LinReg/Lab activity and data-sets")
+setwd("set working directory")
 data<-read.csv("Toyota_SimpleReg.csv",header=T)
 names(data)
 
