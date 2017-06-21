@@ -1,0 +1,393 @@
+#########################Loading the Libraries ############################
+
+library(dplyr)
+library(dummies)
+library(caTools)
+library(randomForest)  
+library(e1071)  
+library(caret)  
+library(ggplot2) 
+library(h2o)
+library(stringr)
+
+#############################################################################
+
+#########################Reading Data #######################################
+
+
+setwd('C:\\Users\\Manu\\Desktop\\Main Project Documents')
+PatientData<-read.csv("DataPatient_Adherence_Batch24.csv")
+
+#############################################################################
+
+
+######################### Data Preprocessing ##################################
+
+str(PatientData)
+
+#Assigning the type of data
+PatientData$PatientID<-as.factor(PatientData$PatientID)
+
+PatientData$ActGPI<-as.factor(PatientData$ActGPI)
+PatientData$Date<-as.Date(PatientData$Date,"%d-%m-%Y")
+PatientData$Month <- as.factor(format(as.Date(PatientData$Date), "%m"))
+PatientData$Year  <- as.factor(format(as.Date(PatientData$Date), "%Y"))
+
+################################Generating Perivous  purchasedate   ####################### 
+
+PatientData$Date<- as.character(PatientData$Date)
+
+
+# Function for creating a new column as PreviousPurchaseDate 
+# PreviousPurchaseDate is NA If Patient Visits or Buy Medicine for the first time.
+# If Patient buys Same Medication for more than one time, we will allocate PreviousPurchaseDate for the same medication
+# This allocation is done by grouping of PatientId And Medication
+
+library(binhf)
+
+
+f1<- function(x)
+{
+  len= length(x)
+  
+  if(len==1){x<-NA}
+  
+  if(len>1)
+  { x<- x %>% shift(1,dir = "right") 
+  x<- x[2:len]
+  x<- c(NA,x)
+  }
+  return(x)
+}
+
+
+#By using f1 function will allocate previouspurchasedate by mutating i.e creating a new column(attribute) as PreviousPurchaseDate
+
+NewPPatientData<-PatientData %>% group_by(PatientID,Medication) %>% arrange(PatientID,Medication,Date) %>% mutate(PreviousPurchaseDate = f1(Date)) 
+
+
+
+################################Generating Perivous  purchasedate   ####################### 
+
+
+
+NewPPatientData$Date <- as.Date(NewPPatientData$Date) 
+
+##calculating the Lag
+## This step is nothing but(ActualPurchaseDate - ExpectedPurchaseDate).
+##ExpectedPurchaseDate is nothing but Addition of (PreviousPurchaseDate + For_HoW_Many_Days) patient have to use medication.
+
+temp1 <- NewPPatientData %>% mutate(Lag=as.numeric(Date-(as.Date(PreviousPurchaseDate)))-For_How_Many_Days)
+
+
+### NA's will be left as NA's and for remaining wit lag>2 will be Non-Adherent 
+### Others are Adherent 
+
+temp2 <-temp1 %>% mutate(Target=as.factor(ifelse( Lag>2,"Non-Adherent","Adherent"))) 
+
+
+## Removing NA's
+temp3 <- temp2 %>% filter(!is.na(Target))
+
+
+##Creating Order of  Group Combination of (Patientid and medication). 
+## example. If a combination of PatientId and medication have 5 rows then the Order will be 5
+
+temp4 <- temp3 %>%  group_by(PatientID,Medication) %>% mutate(Order= n())
+
+temp5<- as.data.frame(temp4)
+
+
+
+## Filtering and extracting data of more than 2 combinations of PatientId and Medication
+
+temp5 <- temp4 %>%  filter(Order>2)
+
+temp6<-as.data.frame(temp5)
+
+## Sorting the data and allocating Unique id within the each group combination of PatientId and Medication.
+
+temp6 <- temp5 %>%  group_by(PatientID,Medication) %>% arrange(PatientID,Medication,Date)  %>% mutate(id = row_number())
+
+View(temp6)
+
+## As ID will be allocated in the 
+  
+temptest <-  temp6 %>%  group_by(PatientID,Medication) %>% filter(id==max(id))
+
+
+temptrain <- temp6 %>%  group_by(PatientID,Medication) %>% filter(id!=max(id))
+
+View(temptrain)
+
+MainTrainData <- temptrain[-c(1,2,7,10,15,16,17,18,20)]
+
+MainTestData <- temptest[-c(1,2,7,10,15,16,17,18,20)]
+
+View(MainTestData)
+
+#write.csv(temp6,"MainData.csv",row.names = FALSE)
+#write.csv(MainTrainData,"TrainData.csv",row.names = FALSE)
+#write.csv(MainTestData,"TestData.csv",row.names = FALSE)
+
+
+############################ ######################################
+
+
+##############  Logistic Model ###################################
+
+model <- glm(Target ~ ., data = MainTrainData, family = binomial)
+
+summary(model)
+
+PredictTrain <- predict(model, type = 'response')
+
+PredictTrain
+
+pred_train <- ifelse(PredictTrain > 0.5,"Non-Adherent","Adherent")
+
+table(MainTrainData$Target, pred_train)
+
+
+
+
+TestPredict <- predict(model, newdata=MainTestData,type = 'response')
+
+
+
+pred_test <- ifelse(TestPredict > 0.3,"Non-Adherent","Adherent")
+
+table(MainTestData$Target, pred_test)
+
+
+
+
+
+############################################################################################
+
+##############  StepAIc  #################################
+
+library(MASS)
+
+AIC(model)
+
+modellog <- stepAIC(model)
+summary(modellog)
+
+predictTrain = predict(modellog, type="response", newdata=MainTrainData)
+
+#Accuracy on the training set
+
+# Confusion matrix with threshold of 0.5
+table(MainTrainData$Target, predictTrain > 0.5)
+t1 <- table(MainTrainData$Target, predictTrain > 0.5)
+
+# Accuracy on Train Set
+(t1[1,1]+t1[2,2])/sum(t1)
+
+
+
+
+
+
+#ROCR Curve
+library(ROCR)
+ROCRpred <- prediction(predictTrain,  MainTrainData$Target)
+
+
+ROCRperf <- performance(ROCRpred, 'tpr','fpr')
+plot(ROCRperf, colorize = TRUE, text.adj = c(-0.2,1.7))
+
+
+
+table(MainTrainData$Target, predictTrain > 0.5)
+
+
+
+
+
+
+
+
+
+#####################################   Decision Trees #############################################################
+
+
+
+
+
+################################6. Build classification model using C50 #######################################
+library(C50)
+
+
+#a. Build model
+DT_C50 <- C5.0(Target~.,data=MainTrainData)
+summary(DT_C50)
+
+#b. Predict "Revenue" for train and test datasets
+pred_Train = predict(DT_C50,newdata=MainTrainData, type="class")
+pred_Test = predict(DT_C50, newdata=MainTestData, type="class")
+
+#c.Confusion Matrix on Train Data
+C50_train_Conf_Matrix = table(MainTrainData$Target,pred_Train);C50_train_Conf_Matrix
+
+#e. Confusion Matrix on Test Data
+C50_test_Conf_Matrix = table(MainTestData$Target,pred_Test);C50_test_Conf_Matrix
+
+#f. Compute the evaluation metric
+accuracy_C50_train = round((sum(diag(C50_train_Conf_Matrix))/sum(C50_train_Conf_Matrix))* 100,2)
+accuracy_C50_train
+accuracy_C50_test = round((sum(diag(C50_test_Conf_Matrix))/sum(C50_test_Conf_Matrix))*100,2)
+accuracy_C50_test
+
+#g. Check variable importance
+C5imp(DT_C50, pct=TRUE)
+
+
+
+####################################### Build classification model using RPART #########################################
+library(rpart)
+
+#a. Build model
+DT_rpart_class<-rpart(Target~.,data=MainTrainData,method="class")
+printcp(DT_rpart_class)
+DT_rpart_class
+summary(DT_rpart_class)
+
+#b. Predict "Revenue" for train and test datasets
+pred_Train = predict(DT_rpart_class,newdata=MainTrainData, type="class")
+pred_Test = predict(DT_rpart_class, newdata=MainTestData, type="class")
+
+#c. Confusion Matrix on Train Data
+Rpart_train_Conf_Matrix = table(MainTrainData$Target,pred_Train);Rpart_train_Conf_Matrix 
+
+#e. Confusion Matrix on Test Data
+Rpart_test_Conf_Matrix = table(MainTestData$Target,pred_Test);Rpart_test_Conf_Matrix
+
+#f. Compute the evaluation metric
+accuracy_rpart_train = round((sum(diag(Rpart_train_Conf_Matrix))/sum(Rpart_train_Conf_Matrix))* 100,2)
+accuracy_rpart_train
+accuracy_rpart_test = round((sum(diag(Rpart_test_Conf_Matrix))/sum(Rpart_test_Conf_Matrix))*100,2)
+accuracy_rpart_test
+
+# Choosing Best CP
+DT_rpart_class1<-rpart(Target~.,data=MainTrainData,method="class",control = rpart.control(cp=0.001))
+printcp(DT_rpart_class1)
+plotcp(DT_rpart_class1)
+plotcp(DT_rpart_class, minline=TRUE, col="blue", lwd=2, lty=1)# draw line 1 SD above minimum rel.error
+
+DT_rpart_class1<-rpart(Target~.,data=MainTrainData,method="class",control = rpart.control(cp=0.0050968))
+printcp(DT_rpart_class1)
+
+#b. Predict "Target" for train and test datasets
+pred_Train1 = predict(DT_rpart_class1,newdata=MainTrainData, type="class")
+pred_Test1 = predict(DT_rpart_class1, newdata=MainTestData, type="class")
+
+#c. Confusion Matrix on Train Data
+Rpart_train_Conf_Matrix1 = table(MainTrainData$Target,pred_Train1);
+Rpart_train_Conf_Matrix1
+
+#e. Confusion Matrix on Test Data
+Rpart_test_Conf_Matrix1 = table(MainTestData$Target,pred_Test1);
+Rpart_test_Conf_Matrix1
+
+#f. Compute the evaluation metric
+accuracy_rpart_train1 = round((sum(diag(Rpart_train_Conf_Matrix1))/sum(Rpart_train_Conf_Matrix1))* 100,2)
+accuracy_rpart_train1
+accuracy_rpart_test1 = round((sum(diag(Rpart_test_Conf_Matrix1))/sum(Rpart_test_Conf_Matrix1))*100,2)
+accuracy_rpart_test1
+
+###########################################################################################################
+
+
+########################   SVM ###########################################
+
+
+library(e1071)
+#Build SVM Model
+model <- svm(Target~., data = MainTrainData, kernel = "linear",cost = 10)
+print(model)
+summary(model)
+
+compareTable <- table(predict(model),MainTrainData$Target);compareTable  
+
+
+
+#predicting on test data
+svm_test1=subset(MainTestData,select=-Target)
+svm_fitted.results <- predict(model,svm_test1)
+#svm_pred_class2 <- ifelse(svm_fitted.results==1,1,0)
+svm_conf.mat2 = table(MainTestData$Target,svm_fitted.results)
+
+svm_conf.mat2
+
+##################################################################################################
+
+############# ************************ Building Random Forest Model ###############******************************************
+
+Dataset<-as.data.frame(temp6)
+
+
+Dataset <- temp6[-c(17,18,20)]
+
+#####################################
+######################### Creating dummies for modeling###############################
+
+FactorDataSet<-sapply(Dataset,is.factor)
+FactorDataSet.df<-Dataset[,FactorDataSet]
+FactorDataSet.df<-FactorDataSet.df[-c(12)]
+
+FactorDataSet.df <-as.data.frame(FactorDataSet.df)
+
+df<-dummy.data.frame(FactorDataSet.df)
+
+numeric<-sapply(Dataset,is.numeric)
+numeric.df<- Dataset[,numeric]
+
+FinalDataset<-cbind(df,numeric.df,"Target"=Dataset$Target)
+
+
+##Dummies removing the space
+col<-colnames(FinalDataset)
+col1<-str_replace_all(col, pattern=" ", repl="")
+colnames(FinalDataset)<-col1
+
+
+
+######################### Spiliting TrainSet,TestSet,PredSet  ############################
+
+PredSet <- FinalDataset %>% filter(id==1)
+
+NonPredSet<- FinalDataset %>% filter(id!=1)
+
+set.seed(123); s = sample.split(NonPredSet$Target,SplitRatio = 0.3)
+TrainSet <-  NonPredSet[!s,]
+TestSet <-  NonPredSet[s,]
+
+
+#########################  Random Forest Model I ###############################
+
+
+#Fit Random Forest Model
+rf = randomForest(Target ~ .,  
+                  ntree = 500,
+                  data = TrainSet,method="classification")
+
+plot(rf)
+
+print(rf)
+
+# Predicton Test Data
+pred_model_test <-predict(rf,TestSet,
+                          type="response", norm.votes=TRUE)
+result_test <- table("actual _values"= TestSet$Target,
+                     pred_model_test);result_test
+
+
+
+
+#######################################################################################
+
+
+
+
